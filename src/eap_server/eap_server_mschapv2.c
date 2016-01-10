@@ -290,6 +290,7 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
   	u8 challenge_hash1[8];
 	const u8 *username, *user;
 	size_t username_len, user_len;
+	int res;
 	int x;
 	char *buf;
 
@@ -330,7 +331,38 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 	wpa_hexdump(MSG_MSGDUMP, "EAP-MSCHAPV2: NT-Response", nt_response, 24);
 	wpa_printf(MSG_MSGDUMP, "EAP-MSCHAPV2: Flags 0x%x", flags);
 	wpa_hexdump_ascii(MSG_MSGDUMP, "EAP-MSCHAPV2: Name", name, name_len);
-	
+
+	buf = os_malloc(name_len * 4 + 1);
+	if (buf) {
+		printf_encode(buf, name_len * 4 + 1, name, name_len);
+		eap_log_msg(sm, "EAP-MSCHAPV2 Name '%s'", buf);
+		os_free(buf);
+	}
+
+	/* MSCHAPv2 does not include optional domain name in the
+	 * challenge-response calculation, so remove domain prefix
+	 * (if present). */
+	username = sm->identity;
+	username_len = sm->identity_len;
+	for (i = 0; i < username_len; i++) {
+		if (username[i] == '\\') {
+			username_len -= i + 1;
+			username += i + 1;
+			break;
+		}
+	}
+
+	user = name;
+	user_len = name_len;
+	for (i = 0; i < user_len; i++) {
+		if (user[i] == '\\') {
+			user_len -= i + 1;
+			user += i + 1;
+			break;
+		}
+	}
+
+	//MANA EAP capture
 	challenge_hash(peer_challenge, data->auth_challenge, name, name_len, challenge_hash1);
 
 	wpa_hexdump(MSG_DEBUG, "EAP-MSCHAPV2: Challenge Hash", challenge_hash1, 8);
@@ -363,37 +395,6 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		fclose(f);
 	}
 
-
-	buf = os_malloc(name_len * 4 + 1);
-	if (buf) {
-		printf_encode(buf, name_len * 4 + 1, name, name_len);
-		eap_log_msg(sm, "EAP-MSCHAPV2 Name '%s'", buf);
-		os_free(buf);
-	}
-
-	/* MSCHAPv2 does not include optional domain name in the
-	 * challenge-response calculation, so remove domain prefix
-	 * (if present). */
-	username = sm->identity;
-	username_len = sm->identity_len;
-	for (i = 0; i < username_len; i++) {
-		if (username[i] == '\\') {
-			username_len -= i + 1;
-			username += i + 1;
-			break;
-		}
-	}
-
-	user = name;
-	user_len = name_len;
-	for (i = 0; i < user_len; i++) {
-		if (user[i] == '\\') {
-			user_len -= i + 1;
-			user += i + 1;
-			break;
-		}
-	}
-
 	if (username_len != user_len ||
 	    os_memcmp(username, user, username_len) != 0) {
 		wpa_printf(MSG_DEBUG, "EAP-MSCHAPV2: Mismatch in user names");
@@ -409,30 +410,25 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 			  username, username_len);
 
 	if (sm->user->password_hash) {
-		//res = generate_nt_response_pwhash(data->auth_challenge,
-		generate_nt_response_pwhash(data->auth_challenge,
+		res = generate_nt_response_pwhash(data->auth_challenge,
 						  peer_challenge,
 						  username, username_len,
 						  sm->user->password,
 						  expected);
 	} else {
-		//res = generate_nt_response(data->auth_challenge,
-		generate_nt_response(data->auth_challenge,
+		res = generate_nt_response(data->auth_challenge,
 					   peer_challenge,
 					   username, username_len,
 					   sm->user->password,
 					   sm->user->password_len,
 					   expected);
 	}
-	//if (res) {
-		//data->state = FAILURE;
-		//return;
-	//}
+	if (res) {
+		data->state = FAILURE;
+		return;
+	}
 
-	nt_response = expected;
-	//os_memset((void *)nt_response, 0, 24);
-	//os_memset((void *)expected, 0, 24);
-	//if (os_memcmp_const(nt_response, expected, 24) == 0) {
+	if (os_memcmp_const(nt_response, expected, 24) == 0) {
 		const u8 *pw_hash;
 		u8 pw_hash_buf[16], pw_hash_hash[16];
 
@@ -448,9 +444,8 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 			if (nt_password_hash(sm->user->password,
 					     sm->user->password_len,
 					     pw_hash_buf) < 0) {
-				//data->state = FAILURE;
-				data->state = SUCCESS;
-				//return;
+				data->state = FAILURE;
+				return;
 			}
 			pw_hash = pw_hash_buf;
 		}
@@ -464,9 +459,12 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		data->master_key_valid = 1;
 		wpa_hexdump_key(MSG_INFO, "EAP-MSCHAPV2: Derived Master Key",
 				data->master_key, MSCHAPV2_KEY_LEN);
-	//} else {
-		//data->state = SUCCESS;
-	//}
+	} else {
+		wpa_hexdump(MSG_MSGDUMP, "EAP-MSCHAPV2: Expected NT-Response",
+			    expected, 24);
+		wpa_printf(MSG_DEBUG, "EAP-MSCHAPV2: Invalid NT-Response");
+		data->state = FAILURE_REQ;
+	}
 }
 
 
