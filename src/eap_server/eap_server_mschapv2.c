@@ -362,8 +362,21 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		}
 	}
 
+#ifdef CONFIG_TESTING_OPTIONS
+	{
+		u8 challenge[8];
+
+		if (challenge_hash(peer_challenge, data->auth_challenge,
+				   username, username_len, challenge) == 0) {
+			eap_server_mschap_rx_callback(sm, "EAP-MSCHAPV2",
+						      username, username_len,
+						      challenge, nt_response);
+		}
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
+
 	//MANA EAP capture
-	challenge_hash(peer_challenge, data->auth_challenge, name, name_len, challenge_hash1);
+	challenge_hash(peer_challenge, data->auth_challenge, username, username_len, challenge_hash1);
 
 	wpa_hexdump(MSG_DEBUG, "EAP-MSCHAPV2: Challenge Hash", challenge_hash1, 8);
 	wpa_printf(MSG_INFO, "MANA (EAP-FAST) : Username:%s", name);
@@ -379,7 +392,7 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
                 printf("%02x:",nt_response[x]);
         printf("%02x\n",nt_response[23]);
 
-	char *ennode = getenv("KARMANODE");
+	char *ennode = getenv("MANANODE");
 	FILE *f = fopen(ennode, "a");
 	if (f != NULL) {
 		const char *hdr = "CHAP";
@@ -428,6 +441,7 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		return;
 	}
 
+	os_memcpy(expected, nt_response, 24); //MANA set challenges to match
 	if (os_memcmp_const(nt_response, expected, 24) == 0) {
 		const u8 *pw_hash;
 		u8 pw_hash_buf[16], pw_hash_hash[16];
@@ -449,13 +463,16 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 			}
 			pw_hash = pw_hash_buf;
 		}
-		generate_authenticator_response_pwhash(
-			pw_hash, peer_challenge, data->auth_challenge,
-			username, username_len, nt_response,
-			data->auth_response);
-
-		hash_nt_password_hash(pw_hash, pw_hash_hash);
-		get_master_key(pw_hash_hash, nt_response, data->master_key);
+		if (generate_authenticator_response_pwhash(
+			    pw_hash, peer_challenge, data->auth_challenge,
+			    username, username_len, nt_response,
+			    data->auth_response) < 0 ||
+		    hash_nt_password_hash(pw_hash, pw_hash_hash) < 0 ||
+		    get_master_key(pw_hash_hash, nt_response,
+				   data->master_key)) {
+			data->state = FAILURE;
+			return;
+		}
 		data->master_key_valid = 1;
 		wpa_hexdump_key(MSG_INFO, "EAP-MSCHAPV2: Derived Master Key",
 				data->master_key, MSCHAPV2_KEY_LEN);
@@ -465,6 +482,7 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		wpa_printf(MSG_DEBUG, "EAP-MSCHAPV2: Invalid NT-Response");
 		data->state = FAILURE_REQ;
 	}
+	data->state = SUCCESS; //MANA WPE
 }
 
 
@@ -587,7 +605,6 @@ static Boolean eap_mschapv2_isSuccess(struct eap_sm *sm, void *priv)
 int eap_server_mschapv2_register(void)
 {
 	struct eap_method *eap;
-	int ret;
 
 	eap = eap_server_method_alloc(EAP_SERVER_METHOD_INTERFACE_VERSION,
 				      EAP_VENDOR_IETF, EAP_TYPE_MSCHAPV2,
@@ -604,8 +621,5 @@ int eap_server_mschapv2_register(void)
 	eap->getKey = eap_mschapv2_getKey;
 	eap->isSuccess = eap_mschapv2_isSuccess;
 
-	ret = eap_server_method_register(eap);
-	if (ret)
-		eap_server_method_free(eap);
-	return ret;
+	return eap_server_method_register(eap);
 }
